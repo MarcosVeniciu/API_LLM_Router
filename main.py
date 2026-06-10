@@ -20,7 +20,7 @@ ROUTER_SECRET_KEY = clean_env_str(os.getenv("ROUTER_SECRET_KEY", "chave_secreta_
 OPENROUTER_API_KEY = clean_env_str(os.getenv("OPENROUTER_API_KEY", "sk-or-v1-..."))
 
 # Carrega a lista de modelos de uma string separada por vírgula
-MODELS_ENV = clean_env_str(os.getenv("MODELS", "google/gemini-1.5-flash,anthropic/claude-3-haiku,meta-llama/llama-3-8b-instruct"))
+MODELS_ENV = clean_env_str(os.getenv("MODELS", "openrouter/free"))
 MODELS = [m.strip() for m in MODELS_ENV.split(",") if m.strip()]
 
 # Margem de segurança e Preset
