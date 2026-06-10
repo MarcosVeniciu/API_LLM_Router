@@ -15,7 +15,7 @@ app = FastAPI(title="LLM Router - Educampo")
 
 # Função auxiliar para limpar aspas injetadas pelo Docker
 def clean_env_str(val: str) -> str:
-    return val.strip().replace('"', '').replace("'", "")
+    return val.strip().replace('"', '').replace("'", "").replace("[", "").replace("]", "")
 
 ROUTER_SECRET_KEY = clean_env_str(os.getenv("ROUTER_SECRET_KEY", "chave_secreta_educampo_123"))
 OPENROUTER_API_KEY = clean_env_str(os.getenv("OPENROUTER_API_KEY", "sk-or-v1-..."))
@@ -74,12 +74,20 @@ def get_best_model():
 
 
 # ==========================================
+# ROTA DE HEALTHCHECK (LEVE PARA O DOCKER)
+# ==========================================
+@app.get("/health")
+async def health_check():
+    # Retorna uma resposta simples e ultraleve apenas para dizer que a API está viva
+    return {"status": "ok"}
+
+# ==========================================
 # 4. AUTENTICAÇÃO INTERNA
 # ==========================================
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
 async def verify_auth(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    if credentials.credentials != ROUTER_SECRET_KEY:
+    if not credentials or credentials.credentials != ROUTER_SECRET_KEY:
         raise HTTPException(status_code=401, detail="Não autorizado")
 
 

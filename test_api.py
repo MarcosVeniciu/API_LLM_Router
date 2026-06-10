@@ -9,7 +9,7 @@ load_dotenv()
 
 # Função auxiliar para testes
 def clean_env_str(val: str) -> str:
-    return val.strip().replace('"', '').replace("'", "")
+    return val.strip().replace('"', '').replace("'", "").replace("[", "").replace("]", "")
 
 # Configurações do teste
 ROUTER_SECRET_KEY = clean_env_str(os.getenv("ROUTER_SECRET_KEY", "chave_secreta_educampo_123"))
