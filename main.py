@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import httpx
 import os
 import json
@@ -75,9 +76,10 @@ def get_best_model():
 # ==========================================
 # 4. AUTENTICAÇÃO INTERNA
 # ==========================================
-async def verify_auth(request: Request):
-    auth_header = request.headers.get("Authorization")
-    if not auth_header or auth_header != f"Bearer {ROUTER_SECRET_KEY}":
+security = HTTPBearer()
+
+async def verify_auth(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    if credentials.credentials != ROUTER_SECRET_KEY:
         raise HTTPException(status_code=401, detail="Não autorizado")
 
 
