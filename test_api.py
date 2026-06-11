@@ -2,6 +2,7 @@ import pytest
 import httpx
 import os
 import asyncio
+from httpx import ASGITransport
 
 from dotenv import load_dotenv
 
@@ -72,3 +73,31 @@ async def test_concurrency():
         
         sucessos = sum(1 for r in results if r.status_code == 200)
         assert sucessos == NUM_REQUESTS, f"Algumas requisições falharam. Sucessos: {sucessos}/{NUM_REQUESTS}"
+
+@pytest.mark.asyncio
+async def test_rpm_tracking():
+    """
+    Testa se o sistema rastreia as Requisições Por Minuto (RPM) corretamente.
+    Ao contrário da lógica antiga de concorrência, o RPM deve se manter incrementado 
+    mesmo após a requisição finalizar (pois ainda está na janela de 60 segundos).
+    """
+    from main import app, request_timestamps, get_current_rpm, MODELS
+    
+    transport = ASGITransport(app=app)
+    headers = {"Authorization": f"Bearer {ROUTER_SECRET_KEY}", "Content-Type": "application/json"}
+    payload = {
+        "stream": False,
+        "messages": [{"role": "user", "content": "Responda apenas 'teste'."}]
+    }
+    
+    # Coleta o RPM inicial
+    initial_rpm = sum(get_current_rpm(m) for m in MODELS)
+    
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        # Executa a requisição real de forma síncrona/blocking pro cliente
+        res = await client.post("/v1/chat/completions", headers=headers, json=payload, timeout=60.0)
+        assert res.status_code == 200, f"A requisição falhou com status {res.status_code}"
+                
+    # Após a requisição terminar, o timestamp deve continuar na janela de 60s
+    final_rpm = sum(get_current_rpm(m) for m in MODELS)
+    assert final_rpm > initial_rpm, "O contador de RPM deve manter o incremento na janela de 60 segundos mesmo após a requisição finalizar."

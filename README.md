@@ -48,6 +48,8 @@ docker run -d \
 | `MODEL_MARGIN` | Margem de segurança de requisições simultâneas por modelo. | `4` |
 | `OPENROUTER_PRESET` | Nome do preset criado no OpenRouter para filtrar provedores. | `meu_preset_de_provedores` |
 | `ALLOWED_DOMAINS` | Lista de domínios com permissão (CORS) para acessar a API separados por vírgula. Use `*` para liberar todos. | `https://meuapp.com,http://localhost:3000` |
+| `APP_NAME` | Nome do aplicativo enviado ao OpenRouter no cabeçalho `X-Title` para identificação da sua app. | `API_LLM_Router` |
+| `APP_URL` | URL do aplicativo enviada no cabeçalho `HTTP-Referer` para o OpenRouter. | `https://educampo.com.br` |
 
 ---
 

@@ -6,6 +6,7 @@ import httpx
 import os
 import json
 import time
+from collections import deque
 
 app = FastAPI(title="LLM Router - Educampo")
 
@@ -32,6 +33,9 @@ OPENROUTER_PRESET = clean_env_str(os.getenv("OPENROUTER_PRESET", "preset_padrao_
 ALLOWED_DOMAINS_ENV = clean_env_str(os.getenv("ALLOWED_DOMAINS", "*"))
 ALLOWED_DOMAINS = [d.strip() for d in ALLOWED_DOMAINS_ENV.split(",") if d.strip()]
 
+APP_NAME = clean_env_str(os.getenv("APP_NAME", "API_LLM_Router"))
+APP_URL = clean_env_str(os.getenv("APP_URL", "none"))
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_DOMAINS,
@@ -43,8 +47,18 @@ app.add_middleware(
 # ==========================================
 # 2. ESTADO EM MEMÓRIA (IN-FLIGHT E VELOCIDADE)
 # ==========================================
-# Rastreador de requisições simultâneas (Fase 1 e 2)
-active_requests = {model: 0 for model in MODELS}
+# Rastreador de requisições por minuto (RPM) usando janela deslizante (sliding window)
+request_timestamps = {model: deque() for model in MODELS}
+
+def get_current_rpm(model: str) -> int:
+    """
+    Calcula o número de Requisições Por Minuto (RPM) para o modelo.
+    Remove da fila (deque) os timestamps mais antigos que 60 segundos.
+    """
+    current_time = time.time()
+    while request_timestamps[model] and request_timestamps[model][0] < current_time - 60:
+        request_timestamps[model].popleft()
+    return len(request_timestamps[model])
 
 # Rastreador de Velocidade (TPS - Tokens Por Segundo)
 # Começamos todos com TPS "infinito" (ou um número alto) para que todos 
@@ -56,20 +70,20 @@ model_tps = {model: 1000.0 for model in MODELS}
 # 3. LÓGICA DE ROTEAMENTO (ALGORITMO DINÂMICO)
 # ==========================================
 def get_best_model():
-    """Escolhe o melhor modelo baseado em TPS em tempo real e na Margem"""
+    """Escolhe o melhor modelo baseado em TPS em tempo real e na Margem (RPM)"""
     
     # Ordena a lista de modelos do MAIS RÁPIDO para o MAIS LENTO no momento atual
     modelos_ordenados_por_tps = sorted(MODELS, key=lambda m: model_tps.get(m, 0), reverse=True)
     
     # Fase 1: Verifica os modelos (do mais rápido para o mais lento). 
-    # Se algum estiver abaixo da margem (ex: < 4), pega ele na hora.
+    # Se algum estiver abaixo da margem de RPM (ex: < 4), pega ele na hora.
     for model in modelos_ordenados_por_tps:
-        if active_requests[model] < MODEL_MARGIN:
+        if get_current_rpm(model) < MODEL_MARGIN:
             return model
             
     # Fase 2: Todos estouraram a margem. Transbordamento igualitário.
-    # Pega o modelo com o menor número absoluto de requisições em andamento.
-    best_model = min(active_requests, key=active_requests.get)
+    # Pega o modelo com o menor RPM no último minuto.
+    best_model = min(MODELS, key=lambda m: get_current_rpm(m))
     return best_model
 
 
@@ -108,15 +122,18 @@ async def route_llm_request(request: Request):
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "API_LLM_Router",
-        "X-Title": "API_LLM_Router"
+        "HTTP-Referer": APP_URL,
+        "X-OpenRouter-Title": APP_NAME
     }
 
+    # ADICIONE ESTA LINHA PARA DEBUG:
+    print(f"[-] DEBUG HEADERS: Referer: '{APP_URL}', Title: '{APP_NAME}'")
     # Verifica se o cliente pediu streaming
     is_stream = body.get("stream", False)
 
-    active_requests[selected_model] += 1
     start_time = time.time()
+    request_timestamps[selected_model].append(start_time)
+    print(f"[+] INÍCIO [{selected_model}] Vel: {model_tps[selected_model]:.1f} TPS | RPM: {get_current_rpm(selected_model)}")
 
     # ==========================================
     # ROTA A: MODO STREAMING
@@ -136,12 +153,12 @@ async def route_llm_request(request: Request):
             except Exception as e:
                 yield json.dumps({"error": str(e)}).encode('utf-8')
             finally:
-                active_requests[selected_model] -= 1
                 elapsed_time = time.time() - start_time
                 if elapsed_time > 0 and chunk_count > 0:
                     current_tps = chunk_count / elapsed_time
                     historico = model_tps[selected_model]
                     model_tps[selected_model] = current_tps if historico == 1000.0 else (historico * 0.8) + (current_tps * 0.2)
+                print(f"[-] FIM    [{selected_model}] Vel: {model_tps[selected_model]:.1f} TPS | RPM: {get_current_rpm(selected_model)}")
                 
         return StreamingResponse(stream_generator(), media_type="application/json")
 
@@ -174,5 +191,4 @@ async def route_llm_request(request: Request):
             return JSONResponse(status_code=500, content={"error": f"Erro interno: {str(e)}"})
             
         finally:
-            active_requests[selected_model] -= 1
-            print(f"[{selected_model}] Vel: {model_tps[selected_model]:.1f} TPS | Em uso: {active_requests[selected_model]}")
+            print(f"[-] FIM    [{selected_model}] Vel: {model_tps[selected_model]:.1f} TPS | RPM: {get_current_rpm(selected_model)}")
