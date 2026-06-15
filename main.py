@@ -50,6 +50,12 @@ app.add_middleware(
 # Rastreador de requisições por minuto (RPM) usando janela deslizante (sliding window)
 request_timestamps = {model: deque() for model in MODELS}
 
+# Limite real de RPM dinâmico descoberto ao receber 429
+model_real_rpm_limit = {model: float('inf') for model in MODELS}
+
+# Cooldown temporal (Circuit Breaker) para modelos que retornaram 429
+model_cooldown = {model: 0.0 for model in MODELS}
+
 def get_current_rpm(model: str) -> int:
     """
     Calcula o número de Requisições Por Minuto (RPM) para o modelo.
@@ -69,21 +75,39 @@ model_tps = {model: 1000.0 for model in MODELS}
 # ==========================================
 # 3. LÓGICA DE ROTEAMENTO (ALGORITMO DINÂMICO)
 # ==========================================
-def get_best_model():
-    """Escolhe o melhor modelo baseado em TPS em tempo real e na Margem (RPM)"""
+def get_best_model(exclude_models: set = None):
+    """
+    Escolhe o melhor modelo baseado em TPS em tempo real, na Margem (RPM),
+    no Limite Dinâmico de RPM Real e nos estados de Cooldown.
+    """
+    if exclude_models is None:
+        exclude_models = set()
+        
+    current_time = time.time()
     
+    available_models = [
+        m for m in MODELS 
+        if m not in exclude_models 
+        and current_time >= model_cooldown.get(m, 0.0) 
+        and get_current_rpm(m) < model_real_rpm_limit.get(m, float('inf'))
+    ]
+    
+    if not available_models:
+        return None
+        
     # Ordena a lista de modelos do MAIS RÁPIDO para o MAIS LENTO no momento atual
-    modelos_ordenados_por_tps = sorted(MODELS, key=lambda m: model_tps.get(m, 0), reverse=True)
+    modelos_ordenados_por_tps = sorted(available_models, key=lambda m: model_tps.get(m, 0), reverse=True)
     
     # Fase 1: Verifica os modelos (do mais rápido para o mais lento). 
     # Se algum estiver abaixo da margem de RPM (ex: < 4), pega ele na hora.
     for model in modelos_ordenados_por_tps:
-        if get_current_rpm(model) < MODEL_MARGIN:
+        effective_margin = min(MODEL_MARGIN, model_real_rpm_limit.get(model, float('inf')))
+        if get_current_rpm(model) < effective_margin:
             return model
             
     # Fase 2: Todos estouraram a margem. Transbordamento igualitário.
     # Pega o modelo com o menor RPM no último minuto.
-    best_model = min(MODELS, key=lambda m: get_current_rpm(m))
+    best_model = min(available_models, key=lambda m: get_current_rpm(m))
     return best_model
 
 
@@ -115,8 +139,6 @@ async def route_llm_request(request: Request):
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="JSON inválido")
 
-    selected_model = get_best_model()
-    body["model"] = selected_model
     body["preset"] = OPENROUTER_PRESET 
 
     headers = {
@@ -131,64 +153,144 @@ async def route_llm_request(request: Request):
     # Verifica se o cliente pediu streaming
     is_stream = body.get("stream", False)
 
-    start_time = time.time()
-    request_timestamps[selected_model].append(start_time)
-    print(f"[+] INÍCIO [{selected_model}] Vel: {model_tps[selected_model]:.1f} TPS | RPM: {get_current_rpm(selected_model)}")
-
     # ==========================================
     # ROTA A: MODO STREAMING
     # ==========================================
     if is_stream:
         async def stream_generator():
-            chunk_count = 0
-            try:
-                async with httpx.AsyncClient() as client:
-                    async with client.stream("POST", "https://openrouter.ai/api/v1/chat/completions", headers=headers, json=body, timeout=None) as response:
-                        if response.status_code != 200:
-                            yield await response.aread()
-                            return
-                        async for chunk in response.aiter_bytes():
-                            chunk_count += 1
-                            yield chunk
-            except Exception as e:
-                yield json.dumps({"error": str(e)}).encode('utf-8')
-            finally:
-                elapsed_time = time.time() - start_time
-                if elapsed_time > 0 and chunk_count > 0:
-                    current_tps = chunk_count / elapsed_time
-                    historico = model_tps[selected_model]
-                    model_tps[selected_model] = current_tps if historico == 1000.0 else (historico * 0.8) + (current_tps * 0.2)
-                print(f"[-] FIM    [{selected_model}] Vel: {model_tps[selected_model]:.1f} TPS | RPM: {get_current_rpm(selected_model)}")
+            tried_models = set()
+            max_attempts = len(MODELS)
+            last_error_response = None
+            
+            for attempt in range(max_attempts):
+                selected_model = get_best_model(exclude_models=tried_models)
+                if not selected_model:
+                    break
+                    
+                body["model"] = selected_model
+                start_time = time.time()
+                request_timestamps[selected_model].append(start_time)
+                print(f"[+] INÍCIO [{selected_model}] Vel: {model_tps[selected_model]:.1f} TPS | RPM: {get_current_rpm(selected_model)}")
                 
+                last_error_status = None
+                
+                chunk_count = 0
+                success = False
+                try:
+                    async with httpx.AsyncClient() as client:
+                        async with client.stream("POST", "https://openrouter.ai/api/v1/chat/completions", headers=headers, json=body, timeout=None) as response:
+                            if response.status_code == 200:
+                                success = True
+                                async for chunk in response.aiter_bytes():
+                                    chunk_count += 1
+                                    yield chunk
+                            else:
+                                last_error_response = await response.aread()
+                                last_error_status = response.status_code
+                except Exception as e:
+                    last_error_response = json.dumps({"error": {"message": str(e), "code": 500}}).encode('utf-8')
+                finally:
+                    elapsed_time = time.time() - start_time
+                    if success and elapsed_time > 0 and chunk_count > 0:
+                        current_tps = chunk_count / elapsed_time
+                        historico = model_tps[selected_model]
+                        model_tps[selected_model] = current_tps if historico == 1000.0 else (historico * 0.8) + (current_tps * 0.2)
+                    print(f"[-] FIM    [{selected_model}] Vel: {model_tps.get(selected_model, 0):.1f} TPS | RPM: {get_current_rpm(selected_model)}")
+
+                if success:
+                    return
+                else:
+                    try:
+                        err_json = json.loads(last_error_response)
+                        err_msg = err_json.get("error", {}).get("message", "")
+                    except:
+                        err_msg = str(last_error_response)
+                        
+                    if "No endpoints found" in err_msg or "provider" in err_msg.lower() or "502" in err_msg:
+                        print(f"[!] MODELO {selected_model} FALHOU (Provider indisponível). TENTANDO OUTRO...")
+                        tried_models.add(selected_model)
+                        continue
+
+                    is_429 = (last_error_status == 429) or ("429" in err_msg) or ("Too Many Requests" in err_msg)
+                    if is_429:
+                        new_limit = max(1, get_current_rpm(selected_model) - 1)
+                        model_real_rpm_limit[selected_model] = new_limit
+                        model_cooldown[selected_model] = time.time() + 60.0
+                        print(f"[!] MODELO {selected_model} FALHOU POR 429. Limite Real Ajustado para {new_limit}. Em Cooldown de 60s.")
+                        tried_models.add(selected_model)
+                        continue
+                        
+                    # Se não for um erro tratável de fallback, repassa imediatamente
+                    yield last_error_response
+                    return
+
+            # Se todos falharam
+            if last_error_response:
+                yield last_error_response
+            else:
+                yield json.dumps({"error": {"message": "Nenhum modelo disponível", "code": 503}}).encode('utf-8')
+
         return StreamingResponse(stream_generator(), media_type="application/json")
 
     # ==========================================
     # ROTA B: MODO NORMAL (BLOCKING)
     # ==========================================
     else:
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=body, timeout=None)
-                response_data = response.json()
+        tried_models = set()
+        max_attempts = len(MODELS)
+        
+        for attempt in range(max_attempts):
+            selected_model = get_best_model(exclude_models=tried_models)
+            if not selected_model:
+                break
                 
-                # Se houver erro do OpenRouter, repassamos imediatamente
-                if response.status_code != 200:
-                    return JSONResponse(status_code=response.status_code, content=response_data)
-
-                # Calcula o TPS com precisão absoluta lendo o uso de tokens
-                elapsed_time = time.time() - start_time
-                if elapsed_time > 0 and "usage" in response_data:
-                    # 'completion_tokens' são os tokens gerados pelo modelo
-                    tokens_gerados = response_data["usage"].get("completion_tokens", 0)
-                    if tokens_gerados > 0:
-                        current_tps = tokens_gerados / elapsed_time
-                        historico = model_tps[selected_model]
-                        model_tps[selected_model] = current_tps if historico == 1000.0 else (historico * 0.8) + (current_tps * 0.2)
-                
-                return JSONResponse(content=response_data)
-                
-        except Exception as e:
-            return JSONResponse(status_code=500, content={"error": f"Erro interno: {str(e)}"})
+            body["model"] = selected_model
+            start_time = time.time()
+            request_timestamps[selected_model].append(start_time)
+            print(f"[+] INÍCIO [{selected_model}] Vel: {model_tps[selected_model]:.1f} TPS | RPM: {get_current_rpm(selected_model)}")
             
-        finally:
-            print(f"[-] FIM    [{selected_model}] Vel: {model_tps[selected_model]:.1f} TPS | RPM: {get_current_rpm(selected_model)}")
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=body, timeout=None)
+                    
+                    if response.status_code == 200:
+                        response_data = response.json()
+                        elapsed_time = time.time() - start_time
+                        if elapsed_time > 0 and "usage" in response_data:
+                            tokens_gerados = response_data["usage"].get("completion_tokens", 0)
+                            if tokens_gerados > 0:
+                                current_tps = tokens_gerados / elapsed_time
+                                historico = model_tps[selected_model]
+                                model_tps[selected_model] = current_tps if historico == 1000.0 else (historico * 0.8) + (current_tps * 0.2)
+                        
+                        print(f"[-] FIM    [{selected_model}] Vel: {model_tps[selected_model]:.1f} TPS | RPM: {get_current_rpm(selected_model)}")
+                        return JSONResponse(content=response_data)
+                    else:
+                        print(f"[-] FIM    [{selected_model}] Vel: {model_tps.get(selected_model, 0):.1f} TPS | RPM: {get_current_rpm(selected_model)}")
+                        try:
+                            response_data = response.json()
+                            err_msg = response_data.get("error", {}).get("message", "")
+                        except:
+                            response_data = {"error": {"message": response.text, "code": response.status_code}}
+                            err_msg = response.text
+                            
+                        if response.status_code in (502, 503) or "No endpoints found" in err_msg or "provider" in err_msg.lower():
+                            print(f"[!] MODELO {selected_model} FALHOU (Erro: {response.status_code}). TENTANDO OUTRO...")
+                            tried_models.add(selected_model)
+                            continue
+                            
+                        if response.status_code == 429 or "429" in err_msg or "Too Many Requests" in err_msg:
+                            new_limit = max(1, get_current_rpm(selected_model) - 1)
+                            model_real_rpm_limit[selected_model] = new_limit
+                            model_cooldown[selected_model] = time.time() + 60.0
+                            print(f"[!] MODELO {selected_model} FALHOU POR 429. Limite Real Ajustado para {new_limit}. Em Cooldown de 60s.")
+                            tried_models.add(selected_model)
+                            continue
+                            
+                        return JSONResponse(status_code=response.status_code, content=response_data)
+                        
+            except Exception as e:
+                print(f"[-] FIM    [{selected_model}] (Exception: {str(e)})")
+                return JSONResponse(status_code=500, content={"error": {"message": f"Erro interno: {str(e)}", "code": 500}})
+                
+        return JSONResponse(status_code=503, content={"error": {"message": "Todos os modelos configurados falharam ou estão indisponíveis.", "code": 503}})
