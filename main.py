@@ -221,6 +221,7 @@ async def route_llm_request(request: Request):
                         continue
                         
                     # Se não for um erro tratável de fallback, repassa imediatamente
+                    print(f"[!] MODELO {selected_model} RETORNOU ERRO IRRECUPERÁVEL. Repassando ao cliente: {err_msg}")
                     yield last_error_response
                     return
 
@@ -287,6 +288,7 @@ async def route_llm_request(request: Request):
                             tried_models.add(selected_model)
                             continue
                             
+                        print(f"[!] MODELO {selected_model} RETORNOU ERRO IRRECUPERÁVEL (Status {response.status_code}). Repassando ao cliente: {err_msg}")
                         return JSONResponse(status_code=response.status_code, content=response_data)
                         
             except Exception as e:
