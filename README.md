@@ -53,15 +53,40 @@ docker run -d \
 
 ---
 
+## 🏗️ Arquitetura Multi-Tenant e Fila Justa (Anti-Thundering Herd)
+
+Para proteger nossos modelos de picos intensos de requisições concorrentes (ex: Celery despachando 300 tarefas simultâneas), a API implementa uma **Fila Justa com Jitter**:
+
+1. **Multi-Tenant (`clients.json`)**: Em vez de uma única chave global para todos, usamos o arquivo `clients.json` na raiz do projeto. A própria chave (senha) do usuário atua como a raiz do objeto JSON, mapeando para o identificador (`client_id`) e a prioridade na fila (`weight`):
+
+   ```json
+   {
+       "senha_secreta_do_cliente_aqui": {
+           "client_id": "nome-do-sistema",
+           "weight": 1.0
+       }
+   }
+   ```
+   
+2. **Concorrência Máxima**: O roteador só abre requisições simultâneas até um teto seguro (`MAX_CONCURRENT`), baseado na quantidade de modelos ativos disponíveis.
+3. **Cota e Rejeição (Jitter)**: Cada cliente ganha uma cota de "espaço na fila" proporcional ao seu peso. Se o cliente estourar essa cota enviando requisições demais, a API barra a requisição com o erro `429 Too Many Requests` e injeta um cabeçalho `Retry-After` com um tempo aleatório entre 30 e 45 segundos (Jitter). Isso espalha as retentativas no tempo e impede que o servidor caia.
+
+---
+
 ## 🛰️ Como Integrar com o Roteador
 
-Qualquer aplicação cliente deve direcionar suas requisições para o endereço deste Roteador (`http://localhost:8000/v1/chat/completions`) em vez de apontar direto para o OpenRouter.
+Qualquer aplicação cliente deve direcionar suas requisições para o endereço deste Roteador (ex: `http://localhost:8000/analise_severidade/v1/chat/completions`) em vez de apontar direto para o OpenRouter.
+
+### 🔑 Autenticação
+**Importante:** O cliente **NÃO** deve enviar o seu `client_id`. Ele deve enviar apenas a sua **Chave Secreta** configurada no `clients.json` usando o cabeçalho Bearer Token padrão. O roteador vai ler a chave e inferir internamente quem é o cliente.
+
+*(Nota: Para fins de retrocompatibilidade ou testes rápidos no `/docs`, a chave global do `.env` chamada `ROUTER_SECRET_KEY` continua funcionando como um "administrador padrão", mas em produção cada serviço deve ter sua chave no JSON).*
 
 ### Exemplo de Requisição (cURL)
 
 ```bash
-curl -X POST http://localhost:8000/v1/chat/completions \
-  -H "Authorization: Bearer sua_chave_secreta_interna_aqui" \
+curl -X POST http://localhost:8000/analise_severidade/v1/chat/completions \
+  -H "Authorization: Bearer chave_teste_pesado_789" \
   -H "Content-Type: application/json" \
   -d '{
     "stream": true,
