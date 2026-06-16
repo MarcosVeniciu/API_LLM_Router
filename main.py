@@ -238,6 +238,7 @@ async def handle_chat_completions(request: Request, models_pool: list, preset: s
                         
                     body["model"] = selected_model
                     start_time = time.time()
+                    start_time_perf = time.perf_counter()
                     request_timestamps[selected_model].append(start_time)
                     print(f"[+] INÍCIO [{selected_model}] Vel: {model_tps[selected_model]:.1f} TPS | RPM: {get_current_rpm(selected_model)}")
                     
@@ -259,7 +260,7 @@ async def handle_chat_completions(request: Request, models_pool: list, preset: s
                     except Exception as e:
                         last_error_response = json.dumps({"error": {"message": str(e), "code": 500}}).encode('utf-8')
                     finally:
-                        elapsed_time = time.time() - start_time
+                        elapsed_time = time.perf_counter() - start_time_perf
                         if success and elapsed_time > 0 and chunk_count > 0:
                             current_tps = chunk_count / elapsed_time
                             historico = model_tps[selected_model]
@@ -333,6 +334,7 @@ async def handle_chat_completions(request: Request, models_pool: list, preset: s
                         
                     body["model"] = selected_model
                     start_time = time.time()
+                    start_time_perf = time.perf_counter()
                     request_timestamps[selected_model].append(start_time)
                     print(f"[+] INÍCIO [{selected_model}] Vel: {model_tps[selected_model]:.1f} TPS | RPM: {get_current_rpm(selected_model)}")
                     
@@ -342,9 +344,21 @@ async def handle_chat_completions(request: Request, models_pool: list, preset: s
                             
                             if response.status_code == 200:
                                 response_data = response.json()
-                                elapsed_time = time.time() - start_time
-                                if elapsed_time > 0 and "usage" in response_data:
-                                    tokens_gerados = response_data["usage"].get("completion_tokens", 0)
+                                elapsed_time = time.perf_counter() - start_time_perf
+                                if elapsed_time > 0:
+                                    tokens_gerados = 0
+                                    if "usage" in response_data and response_data["usage"]:
+                                        tokens_gerados = response_data["usage"].get("completion_tokens", 0)
+                                        
+                                    if tokens_gerados <= 0:
+                                        # Heurística: fallback baseado no tamanho da resposta para contornar falta de usage
+                                        try:
+                                            content_str = response_data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                                            if content_str:
+                                                tokens_gerados = max(1, len(content_str) / 4.0)
+                                        except Exception:
+                                            pass
+
                                     if tokens_gerados > 0:
                                         current_tps = tokens_gerados / elapsed_time
                                         historico = model_tps[selected_model]

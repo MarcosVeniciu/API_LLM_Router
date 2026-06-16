@@ -198,3 +198,50 @@ async def test_fair_queue_and_jitter():
         
         # Garante que o contador de requisições ativas do cliente zerou após o término
         assert client_active_requests.get("teste-pesado", 0) == 0, "Vazamento de memória no contador de fila do cliente."
+
+@pytest.mark.asyncio
+async def test_tps_fallback_no_usage():
+    """
+    [Domain Context] Roteamento Dinâmico: Resolve a falha do TPS travar em 1000.0
+    Testa se o TPS é atualizado quando a resposta da API não contém o bloco 'usage' 
+    (simulando hit de cache ou provedores limitados).
+    O fallback deve calcular os tokens com base na heurística len(content) / 4.
+    """
+    from main import app, model_tps, ALL_MODELS as MODELS
+    from unittest.mock import patch, MagicMock
+    import time
+    
+    # Reseta TPS para 1000.0 em todos
+    for m in MODELS:
+        model_tps[m] = 1000.0
+        
+    transport = ASGITransport(app=app)
+    headers = {"Authorization": f"Bearer {ROUTER_SECRET_KEY}", "Content-Type": "application/json"}
+    payload = {
+        "stream": False,
+        "messages": [{"role": "user", "content": "Teste fallback de TPS."}]
+    }
+    
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "choices": [{"message": {"content": "Esta é uma resposta fictícia moderadamente longa para simular o fallback de cálculo de tokens gerados com base em caracteres."}}]
+        # Observe que não há chave "usage" aqui.
+    }
+    
+    import httpx
+    original_post = httpx.AsyncClient.post
+    
+    async def side_effect_post(self, url, *args, **kwargs):
+        if "openrouter.ai" in str(url):
+            return mock_response
+        return await original_post(self, url, *args, **kwargs)
+    
+    with patch("httpx.AsyncClient.post", new=side_effect_post):
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            res = await client.post("/analise_severidade/v1/chat/completions", headers=headers, json=payload, timeout=5.0)
+            assert res.status_code == 200
+            
+    # Ao menos um modelo deve ter o TPS alterado (pois o fallback preencheu os tokens)
+    tps_atualizado = any(model_tps[m] != 1000.0 for m in MODELS)
+    assert tps_atualizado, "O TPS não foi atualizado! O fallback heurístico (content / 4) falhou ao substituir o usage inexistente."
