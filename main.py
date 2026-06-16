@@ -307,6 +307,9 @@ async def handle_chat_completions(request: Request, models_pool: list, preset: s
                     yield chunk
             finally:
                 client_active_requests[client_id] -= 1
+                # Regra de Negócio: Exibir log de progresso de fila/cota por cliente (Contagem regressiva)
+                restantes = client_active_requests[client_id]
+                print(f"[INFO] Cliente '{client_id}' concluiu requisição (Stream). Restam ativas (fila/processando): {restantes} / Cota Máxima: {client_quota}")
                 
         return StreamingResponse(safe_stream_generator(), media_type="application/json")
 
@@ -383,6 +386,9 @@ async def handle_chat_completions(request: Request, models_pool: list, preset: s
                 
         finally:
             client_active_requests[client_id] -= 1
+            # Regra de Negócio: Exibir log de progresso de fila/cota por cliente (Contagem regressiva)
+            restantes = client_active_requests[client_id]
+            print(f"[INFO] Cliente '{client_id}' concluiu requisição (Blocking). Restam ativas (fila/processando): {restantes} / Cota Máxima: {client_quota}")
 
 # ==========================================
 # 6. ROTAS ESPECÍFICAS DE COMPLEXIDADE
