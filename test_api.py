@@ -245,3 +245,19 @@ async def test_tps_fallback_no_usage():
     # Ao menos um modelo deve ter o TPS alterado (pois o fallback preencheu os tokens)
     tps_atualizado = any(model_tps[m] != 1000.0 for m in MODELS)
     assert tps_atualizado, "O TPS não foi atualizado! O fallback heurístico (content / 4) falhou ao substituir o usage inexistente."
+
+@pytest.mark.asyncio
+async def test_split_margin_variables():
+    """
+    [Domain Context] Roteamento Dinâmico: Verifica se as variáveis de margem global 
+    e limiar de RPM individual foram separadas com sucesso e são independentes.
+    
+    Verifica se:
+    1. GLOBAL_CONCURRENT_MARGIN e MODEL_RPM_BURST_THRESHOLD são carregados corretamente.
+    2. MAX_CONCURRENT é derivado de GLOBAL_CONCURRENT_MARGIN.
+    """
+    from main import GLOBAL_CONCURRENT_MARGIN, MODEL_RPM_BURST_THRESHOLD, MAX_CONCURRENT, ALL_MODELS
+    
+    assert GLOBAL_CONCURRENT_MARGIN is not None
+    assert MODEL_RPM_BURST_THRESHOLD is not None
+    assert MAX_CONCURRENT == max(1, len(ALL_MODELS) - GLOBAL_CONCURRENT_MARGIN)

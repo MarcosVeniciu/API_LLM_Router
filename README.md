@@ -45,7 +45,9 @@ docker run -d \
 | `OPENROUTER_API_KEY` | Sua chave de API real do OpenRouter. | `sk-or-v1-...` |
 | `ROUTER_SECRET_KEY` | Chave criada por você para autenticar os clientes que usarão este Roteador. | `token_secreto_123` |
 | `MODELS` | Lista de modelos elegíveis separados por vírgula. | `google/gemini-1.5-flash,anthropic/claude-3-haiku` |
-| `MODEL_MARGIN` | Margem de segurança de requisições simultâneas por modelo. | `4` |
+| `GLOBAL_CONCURRENT_MARGIN` | Margem de segurança para calcular a concorrência global (descontada do total de modelos). | `4` |
+| `MODEL_RPM_BURST_THRESHOLD` | Limiar de requisições por minuto (RPM) em um único modelo antes de transbordar na Fase 1. | `4` |
+| `MODEL_MARGIN` | (Legado) Margem padrão caso as novas variáveis não estejam definidas. | `4` |
 | `OPENROUTER_PRESET` | Nome do preset criado no OpenRouter para filtrar provedores. | `meu_preset_de_provedores` |
 | `ALLOWED_DOMAINS` | Lista de domínios com permissão (CORS) para acessar a API separados por vírgula. Use `*` para liberar todos. | `https://meuapp.com,http://localhost:3000` |
 | `APP_NAME` | Nome do aplicativo enviado ao OpenRouter no cabeçalho `X-Title` para identificação da sua app. | `API_LLM_Router` |

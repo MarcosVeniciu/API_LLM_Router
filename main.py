@@ -120,6 +120,8 @@ ALL_MODELS = list(set(SEVERIDADE_MODELS + ISHIKAWA_MODELS))
 
 # Margem de segurança e Presets
 MODEL_MARGIN = int(clean_env_str(os.getenv("MODEL_MARGIN", "4")))
+GLOBAL_CONCURRENT_MARGIN = int(clean_env_str(os.getenv("GLOBAL_CONCURRENT_MARGIN", str(MODEL_MARGIN))))
+MODEL_RPM_BURST_THRESHOLD = int(clean_env_str(os.getenv("MODEL_RPM_BURST_THRESHOLD", str(MODEL_MARGIN))))
 SEVERIDADE_OPENROUTER_PRESET = clean_env_str(os.getenv("SEVERIDADE_OPENROUTER_PRESET", "preset_padrao_educampo"))
 ISHIKAWA_OPENROUTER_PRESET = clean_env_str(os.getenv("ISHIKAWA_OPENROUTER_PRESET", "preset_padrao_educampo"))
 
@@ -155,8 +157,8 @@ def get_current_rpm(model: str) -> int:
 model_tps = {model: 1000.0 for model in ALL_MODELS}
 
 # Cálculo Dinâmico da Fila Máxima (Lei de Little)
-# Concorrência Global: Número de modelos menos a margem de segurança.
-MAX_CONCURRENT = max(1, len(ALL_MODELS) - MODEL_MARGIN)
+# Concorrência Global: Número de modelos menos a margem de segurança global.
+MAX_CONCURRENT = max(1, len(ALL_MODELS) - GLOBAL_CONCURRENT_MARGIN)
 # Tamanho Máximo da Fila de Espera (estimado):
 # Permitimos que a fila cresça até 3x a capacidade de concorrência simultânea global.
 MAX_QUEUE_SIZE = MAX_CONCURRENT * 3
@@ -168,8 +170,23 @@ MAX_QUEUE_SIZE = MAX_CONCURRENT * 3
 # ==========================================
 def get_best_model(models_pool: list, exclude_models: set = None):
     """
-    Escolhe o melhor modelo baseado em TPS em tempo real, na Margem (RPM),
-    no Limite Dinâmico de RPM Real e nos estados de Cooldown.
+    Escolhe o melhor modelo disponível com base no TPS em tempo real, na margem 
+    de RPM individual, no limite dinâmico de RPM e nos estados de cooldown.
+
+    Args:
+        models_pool (list): Lista de nomes dos modelos candidatos a serem selecionados.
+        exclude_models (set, optional): Conjunto de modelos a serem desconsiderados/excluídos da seleção.
+
+    Returns:
+        str | None: O nome do melhor modelo selecionado para a requisição ou None se nenhum modelo estiver disponível.
+
+    Raises:
+        None: A função trata erros internamente e retorna None caso nenhum modelo seja elegível.
+
+    Domain Context:
+        Roteamento Dinâmico Resiliente: Garante a escolha eficiente do modelo com maior TPS (velocidade)
+        mantendo o tráfego abaixo do limite seguro de RPM individual (MODEL_RPM_BURST_THRESHOLD) e 
+        fazendo o fallback/transbordo igualitário quando todos os limites de segurança são excedidos.
     """
     if exclude_models is None:
         exclude_models = set()
@@ -190,9 +207,9 @@ def get_best_model(models_pool: list, exclude_models: set = None):
     modelos_ordenados_por_tps = sorted(available_models, key=lambda m: model_tps.get(m, 0), reverse=True)
     
     # Fase 1: Verifica os modelos (do mais rápido para o mais lento). 
-    # Se algum estiver abaixo da margem de RPM (ex: < 4), pega ele na hora.
+    # Se algum estiver abaixo do limiar de RPM individual (ex: < 4), pega ele na hora.
     for model in modelos_ordenados_por_tps:
-        effective_margin = min(MODEL_MARGIN, model_real_rpm_limit.get(model, float('inf')))
+        effective_margin = min(MODEL_RPM_BURST_THRESHOLD, model_real_rpm_limit.get(model, float('inf')))
         if get_current_rpm(model) < effective_margin:
             return model
             
