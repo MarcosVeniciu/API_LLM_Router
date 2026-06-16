@@ -1,0 +1,14 @@
+{
+    "chave_secreta_educampo_123": {
+        "client_id": "api-ishikawa",
+        "weight": 1.0
+    },
+    "chave_cliente_secundario_456": {
+        "client_id": "analytics-dashboard",
+        "weight": 0.5
+    },
+    "chave_teste_pesado_789": {
+        "client_id": "teste-pesado",
+        "weight": 2.0
+    }
+}

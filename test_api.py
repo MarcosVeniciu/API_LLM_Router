@@ -14,7 +14,7 @@ def clean_env_str(val: str) -> str:
 
 # Configurações do teste
 ROUTER_SECRET_KEY = clean_env_str(os.getenv("ROUTER_SECRET_KEY", "chave_secreta_educampo_123"))
-API_URL = "http://localhost:8000/v1/chat/completions"
+API_URL = "http://localhost:8000/analise_severidade/v1/chat/completions"
 
 @pytest.mark.asyncio
 async def test_security_no_token():
@@ -92,7 +92,7 @@ async def test_rpm_tracking():
     Ao contrário da lógica antiga de concorrência, o RPM deve se manter incrementado 
     mesmo após a requisição finalizar (pois ainda está na janela de 60 segundos).
     """
-    from main import app, request_timestamps, get_current_rpm, MODELS
+    from main import app, request_timestamps, get_current_rpm, ALL_MODELS as MODELS
     
     transport = ASGITransport(app=app)
     headers = {"Authorization": f"Bearer {ROUTER_SECRET_KEY}", "Content-Type": "application/json"}
@@ -106,7 +106,7 @@ async def test_rpm_tracking():
     
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         # Executa a requisição real de forma síncrona/blocking pro cliente
-        res = await client.post("/v1/chat/completions", headers=headers, json=payload, timeout=60.0)
+        res = await client.post("/analise_severidade/v1/chat/completions", headers=headers, json=payload, timeout=60.0)
         assert res.status_code == 200, f"A requisição falhou com status {res.status_code}"
                 
     # Após a requisição terminar, o timestamp deve continuar na janela de 60s
@@ -121,7 +121,7 @@ async def test_dynamic_rpm_and_cooldown():
     e que modelos em cooldown não sejam selecionados.
     """
     import time
-    from main import MODELS, get_best_model, request_timestamps, model_real_rpm_limit, model_cooldown
+    from main import ALL_MODELS as MODELS, get_best_model, request_timestamps, model_real_rpm_limit, model_cooldown
     
     # Reseta o estado
     for m in MODELS:
@@ -135,7 +135,7 @@ async def test_dynamic_rpm_and_cooldown():
     model_cooldown[model_a] = time.time() + 60.0
     
     # model_a não deve ser escolhido, pois está em cooldown
-    best = get_best_model()
+    best = get_best_model(MODELS)
     assert best != model_a, "Modelo em cooldown não deveria ser escolhido"
     
     # Remove cooldown
@@ -149,5 +149,52 @@ async def test_dynamic_rpm_and_cooldown():
     request_timestamps[model_a].append(now - 5)
     
     # model_a tem 2 requisições, logo RPM atual (2) >= model_real_rpm_limit (2). Não deve ser selecionado.
-    best_2 = get_best_model()
+    best_2 = get_best_model(MODELS)
     assert best_2 != model_a, "Modelo que atingiu limite RPM real não deveria ser selecionado"
+
+@pytest.mark.asyncio
+async def test_fair_queue_and_jitter():
+    """
+    Testa a cota justa por cliente e o sistema de Jitter (Retry-After) quando a fila máxima é atingida.
+    Como usamos o cliente 'teste-pesado' (chave_teste_pesado_789), ele tem um limite de requisições baseado
+    no tamanho da fila. Vamos simular várias requisições concorrentes que excedem a cota.
+    """
+    from main import app, client_active_requests, MAX_QUEUE_SIZE
+    
+    transport = ASGITransport(app=app)
+    # Chave para o cliente 'teste-pesado' configurada no clients.json
+    headers = {"Authorization": "Bearer chave_teste_pesado_789", "Content-Type": "application/json"}
+    payload = {
+        "stream": False,
+        "messages": [{"role": "user", "content": "Teste."}]
+    }
+    
+    # O peso desse cliente no json é 2.0. Então sua cota é MAX_QUEUE_SIZE * 2.0.
+    # Vamos enviar mais do que essa quantidade de requisições simultâneas.
+    NUM_REQUESTS = int(MAX_QUEUE_SIZE * 2.0) + 5
+    
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        # Precisamos simular requests que fiquem presas ou apenas disparar tudo ao mesmo tempo.
+        tasks = [client.post("/analise_severidade/v1/chat/completions", headers=headers, json=payload, timeout=60.0) for _ in range(NUM_REQUESTS)]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        status_429_count = 0
+        tem_retry_after = False
+        
+        for r in results:
+            if isinstance(r, Exception):
+                continue
+            if r.status_code == 429:
+                status_429_count += 1
+                if "Retry-After" in r.headers:
+                    tem_retry_after = True
+                    # Verifica se o Jitter está no range configurado (30 a 45)
+                    retry_val = int(r.headers["Retry-After"])
+                    assert 30 <= retry_val <= 45, f"Jitter fora do limite: {retry_val}"
+                    
+        # Esperamos que pelo menos 5 requisições tenham retornado 429
+        assert status_429_count > 0, "O sistema não rejeitou requisições com 429 apesar de exceder a cota justa."
+        assert tem_retry_after, "O cabeçalho 'Retry-After' não foi incluído na resposta 429."
+        
+        # Garante que o contador de requisições ativas do cliente zerou após o término
+        assert client_active_requests.get("teste-pesado", 0) == 0, "Vazamento de memória no contador de fila do cliente."

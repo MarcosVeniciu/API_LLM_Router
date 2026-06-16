@@ -6,9 +6,18 @@ import httpx
 import os
 import json
 import time
+import random
+import asyncio
 from collections import deque
 
 app = FastAPI(title="LLM Router - Educampo")
+
+# ==========================================
+# 0. ESTADO GLOBAL DA FILA (SEMAPHORE & COTAS)
+# ==========================================
+active_requests_semaphore = None
+client_active_requests = {}  # { "client_id": int_count }
+
 
 # ==========================================
 # 1. VARIÁVEIS DE AMBIENTE (CONFIGURAÇÕES)
@@ -21,13 +30,19 @@ def clean_env_str(val: str) -> str:
 ROUTER_SECRET_KEY = clean_env_str(os.getenv("ROUTER_SECRET_KEY", "chave_secreta_educampo_123"))
 OPENROUTER_API_KEY = clean_env_str(os.getenv("OPENROUTER_API_KEY", "sk-or-v1-..."))
 
-# Carrega a lista de modelos de uma string separada por vírgula
-MODELS_ENV = clean_env_str(os.getenv("MODELS", "openrouter/free"))
-MODELS = [m.strip() for m in MODELS_ENV.split(",") if m.strip()]
+# Carrega a lista de modelos (Severidade e Ishikawa)
+SEVERIDADE_MODELS_ENV = clean_env_str(os.getenv("SEVERIDADE_MODELS", "openrouter/free"))
+SEVERIDADE_MODELS = [m.strip() for m in SEVERIDADE_MODELS_ENV.split(",") if m.strip()]
 
-# Margem de segurança e Preset
+ISHIKAWA_MODELS_ENV = clean_env_str(os.getenv("ISHIKAWA_MODELS", "openrouter/free"))
+ISHIKAWA_MODELS = [m.strip() for m in ISHIKAWA_MODELS_ENV.split(",") if m.strip()]
+
+ALL_MODELS = list(set(SEVERIDADE_MODELS + ISHIKAWA_MODELS))
+
+# Margem de segurança e Presets
 MODEL_MARGIN = int(clean_env_str(os.getenv("MODEL_MARGIN", "4")))
-OPENROUTER_PRESET = clean_env_str(os.getenv("OPENROUTER_PRESET", "preset_padrao_educampo"))
+SEVERIDADE_OPENROUTER_PRESET = clean_env_str(os.getenv("SEVERIDADE_OPENROUTER_PRESET", "preset_padrao_educampo"))
+ISHIKAWA_OPENROUTER_PRESET = clean_env_str(os.getenv("ISHIKAWA_OPENROUTER_PRESET", "preset_padrao_educampo"))
 
 # Domínios permitidos (CORS)
 ALLOWED_DOMAINS_ENV = clean_env_str(os.getenv("ALLOWED_DOMAINS", "*"))
@@ -45,37 +60,34 @@ app.add_middleware(
 )
 
 # ==========================================
-# 2. ESTADO EM MEMÓRIA (IN-FLIGHT E VELOCIDADE)
+# 2. ESTADO EM MEMÓRIA E LEI DE LITTLE
 # ==========================================
-# Rastreador de requisições por minuto (RPM) usando janela deslizante (sliding window)
-request_timestamps = {model: deque() for model in MODELS}
-
-# Limite real de RPM dinâmico descoberto ao receber 429
-model_real_rpm_limit = {model: float('inf') for model in MODELS}
-
-# Cooldown temporal (Circuit Breaker) para modelos que retornaram 429
-model_cooldown = {model: 0.0 for model in MODELS}
+# Rastreador de requisições por minuto (RPM) usando janela deslizante
+request_timestamps = {model: deque() for model in ALL_MODELS}
+model_real_rpm_limit = {model: float('inf') for model in ALL_MODELS}
+model_cooldown = {model: 0.0 for model in ALL_MODELS}
 
 def get_current_rpm(model: str) -> int:
-    """
-    Calcula o número de Requisições Por Minuto (RPM) para o modelo.
-    Remove da fila (deque) os timestamps mais antigos que 60 segundos.
-    """
     current_time = time.time()
     while request_timestamps[model] and request_timestamps[model][0] < current_time - 60:
         request_timestamps[model].popleft()
     return len(request_timestamps[model])
 
-# Rastreador de Velocidade (TPS - Tokens Por Segundo)
-# Começamos todos com TPS "infinito" (ou um número alto) para que todos 
-# sejam testados pelo menos uma vez na primeira rodada.
-model_tps = {model: 1000.0 for model in MODELS}
+model_tps = {model: 1000.0 for model in ALL_MODELS}
+
+# Cálculo Dinâmico da Fila Máxima (Lei de Little)
+# Concorrência Global: Número de modelos menos a margem de segurança.
+MAX_CONCURRENT = max(1, len(ALL_MODELS) - MODEL_MARGIN)
+# Tamanho Máximo da Fila de Espera (estimado):
+# Permitimos que a fila cresça até 3x a capacidade de concorrência simultânea global.
+MAX_QUEUE_SIZE = MAX_CONCURRENT * 3
+
 
 
 # ==========================================
 # 3. LÓGICA DE ROTEAMENTO (ALGORITMO DINÂMICO)
 # ==========================================
-def get_best_model(exclude_models: set = None):
+def get_best_model(models_pool: list, exclude_models: set = None):
     """
     Escolhe o melhor modelo baseado em TPS em tempo real, na Margem (RPM),
     no Limite Dinâmico de RPM Real e nos estados de Cooldown.
@@ -86,7 +98,7 @@ def get_best_model(exclude_models: set = None):
     current_time = time.time()
     
     available_models = [
-        m for m in MODELS 
+        m for m in models_pool 
         if m not in exclude_models 
         and current_time >= model_cooldown.get(m, 0.0) 
         and get_current_rpm(m) < model_real_rpm_limit.get(m, float('inf'))
@@ -120,26 +132,54 @@ async def health_check():
     return {"status": "ok"}
 
 # ==========================================
-# 4. AUTENTICAÇÃO INTERNA
+# 4. AUTENTICAÇÃO INTERNA MULTI-TENANT
 # ==========================================
 security = HTTPBearer(auto_error=False)
 
-async def verify_auth(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    if not credentials or credentials.credentials != ROUTER_SECRET_KEY:
-        raise HTTPException(status_code=401, detail="Não autorizado")
+def load_clients_db():
+    try:
+        with open("clients.json", "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        # Fallback de segurança se o arquivo não existir
+        return {
+            ROUTER_SECRET_KEY: {
+                "client_id": "default-admin",
+                "weight": 1.0
+            }
+        }
+
+async def verify_auth(request: Request, credentials: HTTPAuthorizationCredentials = Depends(security)):
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Não autorizado (Token ausente)")
+        
+    clients_db = load_clients_db()
+    token = credentials.credentials
+    
+    if token not in clients_db:
+        # Mantém compatibilidade retroativa com chave antiga do .env caso não esteja no JSON
+        if token == ROUTER_SECRET_KEY:
+            request.state.client_id = "default-admin"
+            request.state.client_weight = 1.0
+            return
+        raise HTTPException(status_code=401, detail="Não autorizado (Token inválido)")
+        
+    client_info = clients_db[token]
+    request.state.client_id = client_info.get("client_id", "unknown-client")
+    request.state.client_weight = float(client_info.get("weight", 1.0))
+
 
 
 # ==========================================
-# 5. ENDPOINT PRINCIPAL (PROXY E CÁLCULO DE TPS)
+# 5. LÓGICA DE ROTEAMENTO PRINCIPAL (PROXY E CÁLCULO DE TPS)
 # ==========================================
-@app.post("/v1/chat/completions", dependencies=[Depends(verify_auth)])
-async def route_llm_request(request: Request):
+async def handle_chat_completions(request: Request, models_pool: list, preset: str):
     try:
         body = await request.json()
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="JSON inválido")
 
-    body["preset"] = OPENROUTER_PRESET 
+    body["preset"] = preset 
 
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -152,147 +192,205 @@ async def route_llm_request(request: Request):
     print(f"[-] DEBUG HEADERS: Referer: '{APP_URL}', Title: '{APP_NAME}'")
     # Verifica se o cliente pediu streaming
     is_stream = body.get("stream", False)
+    
+    # -----------------------------------------------------
+    # FAIR QUEUEING & JITTER: Controle de Cota por Cliente
+    # -----------------------------------------------------
+    client_id = request.state.client_id
+    weight = request.state.client_weight
+    
+    # A cota de cada cliente na fila é proporcional ao seu 'weight'
+    client_quota = max(1, int(MAX_QUEUE_SIZE * weight))
+    current_load = client_active_requests.get(client_id, 0)
+    
+    if current_load >= client_quota:
+        # Cliente atingiu seu limite de fila. Aplica o Jitter (Dispersão).
+        retry_after = 30 + random.randint(0, 15)
+        headers_429 = {"Retry-After": str(retry_after)}
+        print(f"[!] REJEIÇÃO (429) por Cota da Fila | Cliente: {client_id} | In-Flight/Queue: {current_load} | Quota: {client_quota} | Jitter: {retry_after}s")
+        return JSONResponse(
+            status_code=429, 
+            content={"error": {"message": f"Servidor sobrecarregado. Cota de fila excedida para este cliente ({current_load}/{client_quota}).", "code": 429}},
+            headers=headers_429
+        )
+        
+    # Cliente autorizado a entrar na fila / processar. Registramos a carga.
+    client_active_requests[client_id] = current_load + 1
 
     # ==========================================
     # ROTA A: MODO STREAMING
     # ==========================================
     if is_stream:
         async def stream_generator():
-            tried_models = set()
-            max_attempts = len(MODELS)
-            last_error_response = None
-            
-            for attempt in range(max_attempts):
-                selected_model = get_best_model(exclude_models=tried_models)
-                if not selected_model:
-                    break
+            global active_requests_semaphore
+            if active_requests_semaphore is None:
+                active_requests_semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+                
+            async with active_requests_semaphore:
+                tried_models = set()
+                max_attempts = len(models_pool)
+                last_error_response = None
+                
+                for attempt in range(max_attempts):
+                    selected_model = get_best_model(models_pool, exclude_models=tried_models)
+                    if not selected_model:
+                        break
+                        
+                    body["model"] = selected_model
+                    start_time = time.time()
+                    request_timestamps[selected_model].append(start_time)
+                    print(f"[+] INÍCIO [{selected_model}] Vel: {model_tps[selected_model]:.1f} TPS | RPM: {get_current_rpm(selected_model)}")
                     
-                body["model"] = selected_model
-                start_time = time.time()
-                request_timestamps[selected_model].append(start_time)
-                print(f"[+] INÍCIO [{selected_model}] Vel: {model_tps[selected_model]:.1f} TPS | RPM: {get_current_rpm(selected_model)}")
-                
-                last_error_status = None
-                
-                chunk_count = 0
-                success = False
-                try:
-                    async with httpx.AsyncClient() as client:
-                        async with client.stream("POST", "https://openrouter.ai/api/v1/chat/completions", headers=headers, json=body, timeout=None) as response:
-                            if response.status_code == 200:
-                                success = True
-                                async for chunk in response.aiter_bytes():
-                                    chunk_count += 1
-                                    yield chunk
-                            else:
-                                last_error_response = await response.aread()
-                                last_error_status = response.status_code
-                except Exception as e:
-                    last_error_response = json.dumps({"error": {"message": str(e), "code": 500}}).encode('utf-8')
-                finally:
-                    elapsed_time = time.time() - start_time
-                    if success and elapsed_time > 0 and chunk_count > 0:
-                        current_tps = chunk_count / elapsed_time
-                        historico = model_tps[selected_model]
-                        model_tps[selected_model] = current_tps if historico == 1000.0 else (historico * 0.8) + (current_tps * 0.2)
-                    print(f"[-] FIM    [{selected_model}] Vel: {model_tps.get(selected_model, 0):.1f} TPS | RPM: {get_current_rpm(selected_model)}")
-
-                if success:
-                    return
-                else:
+                    last_error_status = None
+                    
+                    chunk_count = 0
+                    success = False
                     try:
-                        err_json = json.loads(last_error_response)
-                        err_msg = err_json.get("error", {}).get("message", "")
-                    except:
-                        err_msg = str(last_error_response)
-                        
-                    if "No endpoints found" in err_msg or "provider" in err_msg.lower() or "502" in err_msg:
-                        print(f"[!] MODELO {selected_model} FALHOU (Provider indisponível). TENTANDO OUTRO...")
-                        tried_models.add(selected_model)
-                        continue
-
-                    is_429 = (last_error_status == 429) or ("429" in err_msg) or ("Too Many Requests" in err_msg)
-                    if is_429:
-                        new_limit = max(1, get_current_rpm(selected_model) - 1)
-                        model_real_rpm_limit[selected_model] = new_limit
-                        model_cooldown[selected_model] = time.time() + 60.0
-                        print(f"[!] MODELO {selected_model} FALHOU POR 429. Limite Real Ajustado para {new_limit}. Em Cooldown de 60s.")
-                        tried_models.add(selected_model)
-                        continue
-                        
-                    # Se não for um erro tratável de fallback, repassa imediatamente
-                    print(f"[!] MODELO {selected_model} RETORNOU ERRO IRRECUPERÁVEL. Repassando ao cliente: {err_msg}")
+                        async with httpx.AsyncClient() as client:
+                            async with client.stream("POST", "https://openrouter.ai/api/v1/chat/completions", headers=headers, json=body, timeout=None) as response:
+                                if response.status_code == 200:
+                                    success = True
+                                    async for chunk in response.aiter_bytes():
+                                        chunk_count += 1
+                                        yield chunk
+                                else:
+                                    last_error_response = await response.aread()
+                                    last_error_status = response.status_code
+                    except Exception as e:
+                        last_error_response = json.dumps({"error": {"message": str(e), "code": 500}}).encode('utf-8')
+                    finally:
+                        elapsed_time = time.time() - start_time
+                        if success and elapsed_time > 0 and chunk_count > 0:
+                            current_tps = chunk_count / elapsed_time
+                            historico = model_tps[selected_model]
+                            model_tps[selected_model] = current_tps if historico == 1000.0 else (historico * 0.8) + (current_tps * 0.2)
+                        print(f"[-] FIM    [{selected_model}] Vel: {model_tps.get(selected_model, 0):.1f} TPS | RPM: {get_current_rpm(selected_model)}")
+    
+                    if success:
+                        return
+                    else:
+                        try:
+                            err_json = json.loads(last_error_response)
+                            err_msg = err_json.get("error", {}).get("message", "")
+                        except:
+                            err_msg = str(last_error_response)
+                            
+                        if "No endpoints found" in err_msg or "provider" in err_msg.lower() or "502" in err_msg:
+                            print(f"[!] MODELO {selected_model} FALHOU (Provider indisponível | Msg: {err_msg}). TENTANDO OUTRO...")
+                            tried_models.add(selected_model)
+                            continue
+    
+                        is_429 = (last_error_status == 429) or ("429" in err_msg) or ("Too Many Requests" in err_msg)
+                        if is_429:
+                            new_limit = max(1, get_current_rpm(selected_model) - 1)
+                            model_real_rpm_limit[selected_model] = new_limit
+                            model_cooldown[selected_model] = time.time() + 60.0
+                            print(f"[!] MODELO {selected_model} FALHOU POR 429 (Msg: {err_msg}). Limite Real Ajustado para {new_limit}. Em Cooldown de 60s.")
+                            tried_models.add(selected_model)
+                            continue
+                            
+                        # Se não for um erro tratável de fallback, repassa imediatamente
+                        print(f"[!] MODELO {selected_model} RETORNOU ERRO IRRECUPERÁVEL. Repassando ao cliente: {err_msg}")
+                        yield last_error_response
+                        return
+    
+                # Se todos falharam
+                if last_error_response:
                     yield last_error_response
-                    return
+                else:
+                    yield json.dumps({"error": {"message": "Nenhum modelo disponível", "code": 503}}).encode('utf-8')
 
-            # Se todos falharam
-            if last_error_response:
-                yield last_error_response
-            else:
-                yield json.dumps({"error": {"message": "Nenhum modelo disponível", "code": 503}}).encode('utf-8')
-
-        return StreamingResponse(stream_generator(), media_type="application/json")
+        # Cria uma função geradora com um try/finally por fora para garantir limpeza
+        async def safe_stream_generator():
+            try:
+                async for chunk in stream_generator():
+                    yield chunk
+            finally:
+                client_active_requests[client_id] -= 1
+                
+        return StreamingResponse(safe_stream_generator(), media_type="application/json")
 
     # ==========================================
     # ROTA B: MODO NORMAL (BLOCKING)
     # ==========================================
     else:
-        tried_models = set()
-        max_attempts = len(MODELS)
-        
-        for attempt in range(max_attempts):
-            selected_model = get_best_model(exclude_models=tried_models)
-            if not selected_model:
-                break
-                
-            body["model"] = selected_model
-            start_time = time.time()
-            request_timestamps[selected_model].append(start_time)
-            print(f"[+] INÍCIO [{selected_model}] Vel: {model_tps[selected_model]:.1f} TPS | RPM: {get_current_rpm(selected_model)}")
+        global active_requests_semaphore
+        if active_requests_semaphore is None:
+            active_requests_semaphore = asyncio.Semaphore(MAX_CONCURRENT)
             
-            try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=body, timeout=None)
-                    
-                    if response.status_code == 200:
-                        response_data = response.json()
-                        elapsed_time = time.time() - start_time
-                        if elapsed_time > 0 and "usage" in response_data:
-                            tokens_gerados = response_data["usage"].get("completion_tokens", 0)
-                            if tokens_gerados > 0:
-                                current_tps = tokens_gerados / elapsed_time
-                                historico = model_tps[selected_model]
-                                model_tps[selected_model] = current_tps if historico == 1000.0 else (historico * 0.8) + (current_tps * 0.2)
-                        
-                        print(f"[-] FIM    [{selected_model}] Vel: {model_tps[selected_model]:.1f} TPS | RPM: {get_current_rpm(selected_model)}")
-                        return JSONResponse(content=response_data)
-                    else:
-                        print(f"[-] FIM    [{selected_model}] Vel: {model_tps.get(selected_model, 0):.1f} TPS | RPM: {get_current_rpm(selected_model)}")
-                        try:
-                            response_data = response.json()
-                            err_msg = response_data.get("error", {}).get("message", "")
-                        except:
-                            response_data = {"error": {"message": response.text, "code": response.status_code}}
-                            err_msg = response.text
-                            
-                        if response.status_code in (502, 503) or "No endpoints found" in err_msg or "provider" in err_msg.lower():
-                            print(f"[!] MODELO {selected_model} FALHOU (Erro: {response.status_code}). TENTANDO OUTRO...")
-                            tried_models.add(selected_model)
-                            continue
-                            
-                        if response.status_code == 429 or "429" in err_msg or "Too Many Requests" in err_msg:
-                            new_limit = max(1, get_current_rpm(selected_model) - 1)
-                            model_real_rpm_limit[selected_model] = new_limit
-                            model_cooldown[selected_model] = time.time() + 60.0
-                            print(f"[!] MODELO {selected_model} FALHOU POR 429. Limite Real Ajustado para {new_limit}. Em Cooldown de 60s.")
-                            tried_models.add(selected_model)
-                            continue
-                            
-                        print(f"[!] MODELO {selected_model} RETORNOU ERRO IRRECUPERÁVEL (Status {response.status_code}). Repassando ao cliente: {err_msg}")
-                        return JSONResponse(status_code=response.status_code, content=response_data)
-                        
-            except Exception as e:
-                print(f"[-] FIM    [{selected_model}] (Exception: {str(e)})")
-                return JSONResponse(status_code=500, content={"error": {"message": f"Erro interno: {str(e)}", "code": 500}})
+        try:
+            async with active_requests_semaphore:
+                tried_models = set()
+                max_attempts = len(models_pool)
                 
-        return JSONResponse(status_code=503, content={"error": {"message": "Todos os modelos configurados falharam ou estão indisponíveis.", "code": 503}})
+                for attempt in range(max_attempts):
+                    selected_model = get_best_model(models_pool, exclude_models=tried_models)
+                    if not selected_model:
+                        break
+                        
+                    body["model"] = selected_model
+                    start_time = time.time()
+                    request_timestamps[selected_model].append(start_time)
+                    print(f"[+] INÍCIO [{selected_model}] Vel: {model_tps[selected_model]:.1f} TPS | RPM: {get_current_rpm(selected_model)}")
+                    
+                    try:
+                        async with httpx.AsyncClient() as client:
+                            response = await client.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=body, timeout=None)
+                            
+                            if response.status_code == 200:
+                                response_data = response.json()
+                                elapsed_time = time.time() - start_time
+                                if elapsed_time > 0 and "usage" in response_data:
+                                    tokens_gerados = response_data["usage"].get("completion_tokens", 0)
+                                    if tokens_gerados > 0:
+                                        current_tps = tokens_gerados / elapsed_time
+                                        historico = model_tps[selected_model]
+                                        model_tps[selected_model] = current_tps if historico == 1000.0 else (historico * 0.8) + (current_tps * 0.2)
+                                
+                                print(f"[-] FIM    [{selected_model}] Vel: {model_tps[selected_model]:.1f} TPS | RPM: {get_current_rpm(selected_model)}")
+                                return JSONResponse(content=response_data)
+                            else:
+                                print(f"[-] FIM    [{selected_model}] Vel: {model_tps.get(selected_model, 0):.1f} TPS | RPM: {get_current_rpm(selected_model)}")
+                                try:
+                                    response_data = response.json()
+                                    err_msg = response_data.get("error", {}).get("message", "")
+                                except:
+                                    response_data = {"error": {"message": response.text, "code": response.status_code}}
+                                    err_msg = response.text
+                                    
+                                if response.status_code in (502, 503) or "No endpoints found" in err_msg or "provider" in err_msg.lower():
+                                    print(f"[!] MODELO {selected_model} FALHOU (Erro: {response.status_code} | Msg: {err_msg}). TENTANDO OUTRO...")
+                                    tried_models.add(selected_model)
+                                    continue
+                                    
+                                if response.status_code == 429 or "429" in err_msg or "Too Many Requests" in err_msg:
+                                    new_limit = max(1, get_current_rpm(selected_model) - 1)
+                                    model_real_rpm_limit[selected_model] = new_limit
+                                    model_cooldown[selected_model] = time.time() + 60.0
+                                    print(f"[!] MODELO {selected_model} FALHOU POR 429 (Msg: {err_msg}). Limite Real Ajustado para {new_limit}. Em Cooldown de 60s.")
+                                    tried_models.add(selected_model)
+                                    continue
+                                    
+                            
+                                print(f"[!] MODELO {selected_model} RETORNOU ERRO IRRECUPERÁVEL (Status {response.status_code}). Repassando ao cliente: {err_msg}")
+                                return JSONResponse(status_code=response.status_code, content=response_data)
+                                
+                    except Exception as e:
+                        print(f"[-] FIM    [{selected_model}] (Exception: {str(e)})")
+                        return JSONResponse(status_code=500, content={"error": {"message": f"Erro interno: {str(e)}", "code": 500}})
+                        
+                return JSONResponse(status_code=503, content={"error": {"message": "Todos os modelos configurados falharam ou estão indisponíveis.", "code": 503}})
+                
+        finally:
+            client_active_requests[client_id] -= 1
+
+# ==========================================
+# 6. ROTAS ESPECÍFICAS DE COMPLEXIDADE
+# ==========================================
+@app.post("/analise_severidade/v1/chat/completions", dependencies=[Depends(verify_auth)])
+async def route_llm_request_severidade(request: Request):
+    return await handle_chat_completions(request, SEVERIDADE_MODELS, SEVERIDADE_OPENROUTER_PRESET)
+
+@app.post("/analise_ishikawa/v1/chat/completions", dependencies=[Depends(verify_auth)])
+async def route_llm_request_ishikawa(request: Request):
+    return await handle_chat_completions(request, ISHIKAWA_MODELS, ISHIKAWA_OPENROUTER_PRESET)
