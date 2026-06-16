@@ -16,4 +16,4 @@ EXPOSE 8000
 
 # Comando para rodar o Uvicorn forcando 1 ÚNICO worker (--workers 1)
 # Isso mantém a contagem de requisições centralizada na memória local
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--no-access-log"]

@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from rich.live import Live
 from rich.table import Table
 from rich.panel import Panel
-from rich.console import Group
+from rich.console import Group, Console
 from rich import box
 from datetime import datetime
 
@@ -24,7 +24,8 @@ recent_errors = deque(maxlen=5)
 
 async def live_dashboard():
     """Tarefa em background para atualizar o console do Docker usando rich."""
-    with Live(auto_refresh=False) as live:
+    console = Console(force_terminal=True, color_system="standard")
+    with Live(auto_refresh=False, console=console) as live:
         while True:
             try:
                 # 1. Tabela de Modelos
@@ -75,8 +76,8 @@ async def live_dashboard():
 
                 group = Group(table, painel_resumo, painel_erros)
                 live.update(group, refresh=True)
-            except Exception:
-                pass
+            except Exception as e:
+                console.print(f"[red]Erro no dashboard: {str(e)}[/red]")
             await asyncio.sleep(1.0)
 
 @asynccontextmanager

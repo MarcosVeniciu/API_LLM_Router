@@ -10,6 +10,7 @@ services:
       - "8000:8000"
     env_file:
       - .env
+    tty: true
     restart: unless-stopped
     deploy:
       resources:
