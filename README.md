@@ -100,16 +100,16 @@ curl -X POST http://localhost:8000/analise_severidade/v1/chat/completions \
 
 ## 🪵 Como Monitorar o Status do Roteamento
 
-Como o container roda em segundo plano, para acompanhar qual modelo está sendo escolhido e a velocidade real em tempo real, use o comando:
+A API implementa um painel de monitoramento dinâmico no console (Live Dashboard) utilizando a biblioteca `rich`.
+
+Como o container roda em segundo plano, o comando tradicional `docker logs -f` ou `docker-compose logs -f` **não** renderiza os caracteres ANSI de cursor adequadamente, gerando um efeito de rolagem de tela infinita e quebra de layout.
+
+Para visualizar o painel interativo perfeitamente atualizado em tempo real no console, conecte-se diretamente (attach) ao container:
 
 ```bash
-docker logs -f llm-router
+docker attach api_llm_router-llm_router_api-1
 ```
+*(Caso seu container possua outro nome, substitua `api_llm_router-llm_router_api-1` pelo nome retornado em `docker ps`).*
 
-Você verá saídas no terminal como esta:
-
-```text
--> Disparando para google/gemini-1.5-flash | Estado atual: {'google/gemini-1.5-flash': 1, 'anthropic/claude-3-haiku': 0}
-<- Conexão fechada para google/gemini-1.5-flash | Estado atual: {'google/gemini-1.5-flash': 0, 'anthropic/claude-3-haiku': 0}
-[google/gemini-1.5-flash] Vel: 120.5 TPS | Em uso: 0
-```
+> [!IMPORTANT]
+> **Como desanexar com segurança:** Para sair da visualização do terminal sem encerrar ou desligar o container da API, pressione a sequência de teclas **`CTRL + P` seguido de `CTRL + Q`**.
