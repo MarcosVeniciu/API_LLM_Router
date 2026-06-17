@@ -18,16 +18,23 @@ llm_router/
 
 ## 🚀 Como Executar Localmente com Docker
 
-### 1. Construir a imagem Docker
+Crie um arquivo `.env` a partir do `.env.example` e preencha com suas credenciais.
+
+### 1. Utilizando Docker Compose (Recomendado)
 Na raiz do projeto, execute:
+```bash
+docker-compose up -d --build
+```
+
+### 2. Alternativa: Docker Run Manual
+Caso prefira não usar o Docker Compose:
+
+1. Construa a imagem:
 ```bash
 docker build -t llm-router-educampo .
 ```
 
-### 2. Rodar o container
-
-Crie um arquivo `.env` a partir do `.env.example` e preencha com suas credenciais. Depois, rode o container:
-
+2. Rode o container:
 ```bash
 docker run -d \
   -p 8000:8000 \
@@ -44,11 +51,13 @@ docker run -d \
 | --- | --- | --- |
 | `OPENROUTER_API_KEY` | Sua chave de API real do OpenRouter. | `sk-or-v1-...` |
 | `ROUTER_SECRET_KEY` | Chave criada por você para autenticar os clientes que usarão este Roteador. | `token_secreto_123` |
-| `MODELS` | Lista de modelos elegíveis separados por vírgula. | `google/gemini-1.5-flash,anthropic/claude-3-haiku` |
+| `SEVERIDADE_MODELS` | Lista de modelos elegíveis para severidade separados por vírgula. | `google/gemini-1.5-flash,anthropic/claude-3-haiku` |
+| `ISHIKAWA_MODELS` | Lista de modelos elegíveis para ishikawa separados por vírgula. | `google/gemini-1.5-flash,meta-llama/llama-3-8b-instruct` |
 | `GLOBAL_CONCURRENT_MARGIN` | Margem de segurança para calcular a concorrência global (descontada do total de modelos). | `4` |
 | `MODEL_RPM_BURST_THRESHOLD` | Limiar de requisições por minuto (RPM) em um único modelo antes de transbordar na Fase 1. | `4` |
 | `MODEL_MARGIN` | (Legado) Margem padrão caso as novas variáveis não estejam definidas. | `4` |
-| `OPENROUTER_PRESET` | Nome do preset criado no OpenRouter para filtrar provedores. | `meu_preset_de_provedores` |
+| `SEVERIDADE_OPENROUTER_PRESET` | Nome do preset criado no OpenRouter para provedores de severidade. | `preset_padrao_educampo` |
+| `ISHIKAWA_OPENROUTER_PRESET` | Nome do preset criado no OpenRouter para provedores de ishikawa. | `preset_padrao_educampo` |
 | `ALLOWED_DOMAINS` | Lista de domínios com permissão (CORS) para acessar a API separados por vírgula. Use `*` para liberar todos. | `https://meuapp.com,http://localhost:3000` |
 | `APP_NAME` | Nome do aplicativo enviado ao OpenRouter no cabeçalho `X-Title` para identificação da sua app. | `API_LLM_Router` |
 | `APP_URL` | URL do aplicativo enviada no cabeçalho `HTTP-Referer` para o OpenRouter. | `https://educampo.com.br` |
@@ -77,7 +86,9 @@ Para proteger nossos modelos de picos intensos de requisições concorrentes (ex
 
 ## 🛰️ Como Integrar com o Roteador
 
-Qualquer aplicação cliente deve direcionar suas requisições para o endereço deste Roteador (ex: `http://localhost:8000/analise_severidade/v1/chat/completions`) em vez de apontar direto para o OpenRouter.
+Qualquer aplicação cliente deve direcionar suas requisições para o endereço deste Roteador em vez de apontar direto para o OpenRouter. Estão disponíveis duas rotas baseadas na complexidade:
+- **Análise de Severidade:** `http://localhost:8000/analise_severidade/v1/chat/completions`
+- **Análise de Ishikawa:** `http://localhost:8000/analise_ishikawa/v1/chat/completions`
 
 ### 🔑 Autenticação
 **Importante:** O cliente **NÃO** deve enviar o seu `client_id`. Ele deve enviar apenas a sua **Chave Secreta** configurada no `clients.json` usando o cabeçalho Bearer Token padrão. O roteador vai ler a chave e inferir internamente quem é o cliente.
@@ -107,9 +118,9 @@ Como o container roda em segundo plano, o comando tradicional `docker logs -f` o
 Para visualizar o painel interativo perfeitamente atualizado em tempo real no console, conecte-se diretamente (attach) ao container:
 
 ```bash
-docker attach api_llm_router-llm_router_api-1
+docker attach llm_router_api
 ```
-*(Caso seu container possua outro nome, substitua `api_llm_router-llm_router_api-1` pelo nome retornado em `docker ps`).*
+*(Caso seu container possua outro nome, substitua `llm_router_api` pelo nome retornado em `docker ps`).*
 
 > [!IMPORTANT]
 > **Como desanexar com segurança:** Para sair da visualização do terminal sem encerrar ou desligar o container da API, pressione a sequência de teclas **`CTRL + P` seguido de `CTRL + Q`**.

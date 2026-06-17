@@ -22,6 +22,20 @@ model_active_requests = {}
 # Histórico de erros recentes (limite de 5)
 recent_errors = deque(maxlen=5)
 
+def log_dashboard_error(msg: str):
+    """
+    Adiciona um erro ao histórico do dashboard com formatação de data/hora.
+    
+    Args:
+        msg (str): A mensagem de erro a ser exibida.
+        
+    Domain Context:
+        Dashboard: Mantém o registro rastreável (com timestamp) das últimas 
+        falhas para observabilidade em tempo real.
+    """
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    recent_errors.append(f"[{timestamp}] {msg}")
+
 async def live_dashboard():
     """Tarefa em background para atualizar o console do Docker usando rich."""
     console = Console(force_terminal=True, color_system="standard")
@@ -299,9 +313,9 @@ async def handle_chat_completions(request: Request, models_pool: list, preset: s
     
     if current_load >= client_quota:
         # Cliente atingiu seu limite de fila. Aplica o Jitter (Dispersão).
-        retry_after = 30 + random.randint(0, 15)
+        retry_after = random.randint(1, 5)
         headers_429 = {"Retry-After": str(retry_after)}
-        recent_errors.append(f"[!] REJEIÇÃO (429) Cota da Fila | Cliente: {client_id} | In-Flight: {current_load}/{client_quota}")
+        log_dashboard_error(f"[!] REJEIÇÃO (429) Cota da Fila | Cliente: {client_id} | In-Flight: {current_load}/{client_quota}")
         return JSONResponse(
             status_code=429, 
             content={"error": {"message": f"Servidor sobrecarregado. Cota de fila excedida para este cliente ({current_load}/{client_quota}).", "code": 429}},
@@ -367,11 +381,21 @@ async def handle_chat_completions(request: Request, models_pool: list, preset: s
                         try:
                             err_json = json.loads(last_error_response)
                             err_msg = err_json.get("error", {}).get("message", "")
+                            
+                            # Tentar extrair o erro original do provedor
+                            metadata = err_json.get("error", {}).get("metadata", {})
+                            if metadata and "provider" in err_msg.lower():
+                                raw_err = metadata.get("raw", str(metadata))
+                                err_msg = f"{err_msg} - {raw_err}"
                         except:
                             err_msg = str(last_error_response)
                             
+                        # Limitar o tamanho da mensagem para não quebrar o layout
+                        err_msg_trunc = (err_msg[:75] + '...') if len(err_msg) > 75 else err_msg
+                            
                         if "No endpoints found" in err_msg or "provider" in err_msg.lower() or "502" in err_msg:
-                            recent_errors.append(f"[!] {selected_model} FALHOU (Indisponível | Msg: {err_msg[:50]})")
+                            # Contexto: Erro do provedor é tratado como falha transiente, não afeta limite RPM
+                            log_dashboard_error(f"[!] {selected_model} FALHOU (Erro no Provedor | Msg: {err_msg_trunc})")
                             tried_models.add(selected_model)
                             continue
     
@@ -380,12 +404,12 @@ async def handle_chat_completions(request: Request, models_pool: list, preset: s
                             new_limit = max(1, get_current_rpm(selected_model) - 1)
                             model_real_rpm_limit[selected_model] = new_limit
                             model_cooldown[selected_model] = time.time() + 60.0
-                            recent_errors.append(f"[!] {selected_model} 429 (Ajustando Limite p/ {new_limit})")
+                            log_dashboard_error(f"[!] {selected_model} 429 (Ajustando Limite p/ {new_limit})")
                             tried_models.add(selected_model)
                             continue
                             
                         # Se não for um erro tratável de fallback, repassa imediatamente
-                        recent_errors.append(f"[!] {selected_model} ERRO IRRECUPERÁVEL: {err_msg[:50]}")
+                        log_dashboard_error(f"[!] {selected_model} ERRO IRRECUPERÁVEL: {err_msg_trunc}")
                         yield last_error_response
                         return
     
@@ -460,12 +484,22 @@ async def handle_chat_completions(request: Request, models_pool: list, preset: s
                                 try:
                                     response_data = response.json()
                                     err_msg = response_data.get("error", {}).get("message", "")
+                                    
+                                    # Tentar extrair o erro original do provedor
+                                    metadata = response_data.get("error", {}).get("metadata", {})
+                                    if metadata and "provider" in err_msg.lower():
+                                        raw_err = metadata.get("raw", str(metadata))
+                                        err_msg = f"{err_msg} - {raw_err}"
                                 except:
                                     response_data = {"error": {"message": response.text, "code": response.status_code}}
                                     err_msg = response.text
                                     
+                                # Limitar o tamanho da mensagem para não quebrar o layout
+                                err_msg_trunc = (err_msg[:75] + '...') if len(err_msg) > 75 else err_msg
+                                    
                                 if response.status_code in (502, 503) or "No endpoints found" in err_msg or "provider" in err_msg.lower():
-                                    recent_errors.append(f"[!] {selected_model} FALHOU (Indisponível | Msg: {err_msg[:50]})")
+                                    # Contexto: Erro do provedor é tratado como falha transiente, não afeta limite RPM
+                                    log_dashboard_error(f"[!] {selected_model} FALHOU (Erro no Provedor | Msg: {err_msg_trunc})")
                                     tried_models.add(selected_model)
                                     continue
                                     
@@ -473,15 +507,16 @@ async def handle_chat_completions(request: Request, models_pool: list, preset: s
                                     new_limit = max(1, get_current_rpm(selected_model) - 1)
                                     model_real_rpm_limit[selected_model] = new_limit
                                     model_cooldown[selected_model] = time.time() + 60.0
-                                    recent_errors.append(f"[!] {selected_model} 429 (Ajustando Limite p/ {new_limit})")
+                                    log_dashboard_error(f"[!] {selected_model} 429 (Ajustando Limite p/ {new_limit})")
                                     tried_models.add(selected_model)
                                     continue
                                     
-                                recent_errors.append(f"[!] {selected_model} ERRO IRRECUPERÁVEL (Status {response.status_code})")
+                                log_dashboard_error(f"[!] {selected_model} ERRO IRRECUPERÁVEL (Status {response.status_code}): {err_msg_trunc}")
                                 return JSONResponse(status_code=response.status_code, content=response_data)
                                 
                     except Exception as e:
-                        recent_errors.append(f"[!] {selected_model} Exception: {str(e)[:50]}")
+                        err_msg_trunc = (str(e)[:75] + '...') if len(str(e)) > 75 else str(e)
+                        log_dashboard_error(f"[!] {selected_model} Exception: {err_msg_trunc}")
                         return JSONResponse(status_code=500, content={"error": {"message": f"Erro interno: {str(e)}", "code": 500}})
                     finally:
                         model_active_requests[selected_model] = max(0, model_active_requests.get(selected_model, 0) - 1)

@@ -188,9 +188,9 @@ async def test_fair_queue_and_jitter():
                 status_429_count += 1
                 if "Retry-After" in r.headers:
                     tem_retry_after = True
-                    # Verifica se o Jitter está no range configurado (30 a 45)
+                    # Verifica se o Jitter está no range configurado (1 a 5)
                     retry_val = int(r.headers["Retry-After"])
-                    assert 30 <= retry_val <= 45, f"Jitter fora do limite: {retry_val}"
+                    assert 1 <= retry_val <= 5, f"Jitter fora do limite: {retry_val}"
                     
         # Esperamos que pelo menos 5 requisições tenham retornado 429
         assert status_429_count > 0, "O sistema não rejeitou requisições com 429 apesar de exceder a cota justa."
