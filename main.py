@@ -92,7 +92,11 @@ async def live_dashboard():
                 table.add_column("RPM Atual", justify="right", style="yellow")
                 table.add_column("Velocidade (TPS)", justify="right", style="green")
 
-                for model in sorted(ALL_MODELS):
+                # Ordena os modelos pela heurística principal do roteador (TPS descendente).
+                # Em caso de empate (ex: TPS inicial de 1000.0), o desempate é feito por ordem alfabética.
+                # O sinal negativo no TPS permite ordenar do maior para o menor, enquanto a string (m) ordena A-Z.
+                modelos_ordenados = sorted(ALL_MODELS, key=lambda m: (-model_tps.get(m, 0.0), m))
+                for model in modelos_ordenados:
                     ativas = model_active_requests.get(model, 0)
                     limite = model_real_rpm_limit.get(model, float('inf'))
                     limite_str = str(limite) if limite != float('inf') else "∞"
