@@ -36,6 +36,47 @@ def log_dashboard_error(msg: str):
     timestamp = datetime.now().strftime("%H:%M:%S")
     recent_errors.append(f"[{timestamp}] {msg}")
 
+def log_debug_error_to_file(selected_model: str, payload: dict, error_response: str) -> None:
+    """
+    Registra um erro detalhado de provedor em um arquivo local (debug_errors.json) para
+    permitir a inspeção completa do payload original e do erro bruto (sem truncamento).
+
+    Args:
+        selected_model (str): O modelo que estava sendo tentado no momento do erro.
+        payload (dict): O payload original (corpo da requisição) enviado pelo cliente.
+        error_response (str): A resposta bruta (em string/json) retornada pelo OpenRouter.
+
+    Returns:
+        None
+
+    Domain Context:
+        Observabilidade/Troubleshooting: Ajuda a identificar gargalos de schema (JSON Schema, Tools) ou
+        limites de contexto que estão quebrando requisições no downstream. Preserva o layout
+        visual do dashboard (rich) ao armazenar o JSON completo aqui.
+    """
+    timestamp = datetime.now().isoformat()
+    log_entry = {
+        "timestamp": timestamp,
+        "model": selected_model,
+        "payload": payload,
+        "error_raw": error_response
+    }
+    try:
+        lines = []
+        if os.path.exists("debug_errors.json"):
+            with open("debug_errors.json", "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        
+        lines.append(json.dumps(log_entry, ensure_ascii=False) + "\n")
+        
+        if len(lines) > 50:
+            lines = lines[-50:]
+            
+        with open("debug_errors.json", "w", encoding="utf-8") as f:
+            f.writelines(lines)
+    except Exception:
+        pass
+
 async def live_dashboard():
     """Tarefa em background para atualizar o console do Docker usando rich."""
     console = Console(force_terminal=True, color_system="standard")
@@ -395,6 +436,7 @@ async def handle_chat_completions(request: Request, models_pool: list, preset: s
                             
                         if "No endpoints found" in err_msg or "provider" in err_msg.lower() or "502" in err_msg:
                             # Contexto: Erro do provedor é tratado como falha transiente, não afeta limite RPM
+                            log_debug_error_to_file(selected_model, body, str(last_error_response))
                             log_dashboard_error(f"[!] {selected_model} FALHOU (Erro no Provedor | Msg: {err_msg_trunc})")
                             tried_models.add(selected_model)
                             continue
@@ -409,6 +451,7 @@ async def handle_chat_completions(request: Request, models_pool: list, preset: s
                             continue
                             
                         # Se não for um erro tratável de fallback, repassa imediatamente
+                        log_debug_error_to_file(selected_model, body, str(last_error_response))
                         log_dashboard_error(f"[!] {selected_model} ERRO IRRECUPERÁVEL: {err_msg_trunc}")
                         yield last_error_response
                         return
@@ -499,6 +542,7 @@ async def handle_chat_completions(request: Request, models_pool: list, preset: s
                                     
                                 if response.status_code in (502, 503) or "No endpoints found" in err_msg or "provider" in err_msg.lower():
                                     # Contexto: Erro do provedor é tratado como falha transiente, não afeta limite RPM
+                                    log_debug_error_to_file(selected_model, body, response.text)
                                     log_dashboard_error(f"[!] {selected_model} FALHOU (Erro no Provedor | Msg: {err_msg_trunc})")
                                     tried_models.add(selected_model)
                                     continue
@@ -511,6 +555,7 @@ async def handle_chat_completions(request: Request, models_pool: list, preset: s
                                     tried_models.add(selected_model)
                                     continue
                                     
+                                log_debug_error_to_file(selected_model, body, response.text)
                                 log_dashboard_error(f"[!] {selected_model} ERRO IRRECUPERÁVEL (Status {response.status_code}): {err_msg_trunc}")
                                 return JSONResponse(status_code=response.status_code, content=response_data)
                                 
