@@ -17,6 +17,8 @@ from rich.console import Group, Console
 from rich import box
 from datetime import datetime
 
+__version__ = "1.0.0"
+
 # Rastreador de requisições ativas por modelo
 model_active_requests = {}
 # Histórico de erros recentes (limite de 5)
@@ -148,7 +150,7 @@ async def lifespan(app: FastAPI):
     yield
     task.cancel()
 
-app = FastAPI(title="LLM Router - Educampo", lifespan=lifespan)
+app = FastAPI(title="LLM Router - Educampo", version=__version__, lifespan=lifespan)
 
 # ==========================================
 # 0. ESTADO GLOBAL DA FILA (SEMAPHORE & COTAS)
