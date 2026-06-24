@@ -1,4 +1,5 @@
 # LLM Router - Gateway Inteligente para Educampo
+> **Versão:** v1.0.0
 
 API intermediária (Gateway) desenvolvida em Python com FastAPI para fazer a orquestração e balanceamento de carga inteligente entre múltiplos modelos através do OpenRouter. 
 
@@ -13,6 +14,8 @@ llm_router/
 ├── Dockerfile           # Instruções de build do container
 ├── .env                 # Variáveis de ambiente (crie a partir do .env.example)
 ├── .env.example         # Exemplo de variáveis de ambiente
+├── test_api.py          # Testes das rotas de negócio
+├── test_version.py      # Testes de unidade e integridade da versão
 └── README.md            # Documentação de uso e deploy
 ```
 
