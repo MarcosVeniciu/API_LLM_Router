@@ -92,7 +92,9 @@ async def test_rpm_tracking():
     Ao contrário da lógica antiga de concorrência, o RPM deve se manter incrementado 
     mesmo após a requisição finalizar (pois ainda está na janela de 60 segundos).
     """
-    from main import app, request_timestamps, get_current_rpm, ALL_MODELS as MODELS
+    from main import app
+    from core.state import request_timestamps, get_current_rpm
+    from core.config import ALL_MODELS as MODELS
     
     transport = ASGITransport(app=app)
     headers = {"Authorization": f"Bearer {ROUTER_SECRET_KEY}", "Content-Type": "application/json"}
@@ -121,7 +123,9 @@ async def test_dynamic_rpm_and_cooldown():
     e que modelos em cooldown não sejam selecionados.
     """
     import time
-    from main import ALL_MODELS as MODELS, get_best_model, request_timestamps, model_real_rpm_limit, model_cooldown
+    from core.config import ALL_MODELS as MODELS
+    from domain.routing import get_best_model
+    from core.state import request_timestamps, model_real_rpm_limit, model_cooldown
     
     # Reseta o estado
     for m in MODELS:
@@ -159,7 +163,9 @@ async def test_fair_queue_and_jitter():
     Como usamos o cliente 'teste-pesado' (chave_teste_pesado_789), ele tem um limite de requisições baseado
     no tamanho da fila. Vamos simular várias requisições concorrentes que excedem a cota.
     """
-    from main import app, client_active_requests, MAX_QUEUE_SIZE
+    from main import app
+    from core.state import client_active_requests
+    from domain.routing import MAX_QUEUE_SIZE
     
     transport = ASGITransport(app=app)
     # Chave para o cliente 'teste-pesado' configurada no clients.json
@@ -207,7 +213,9 @@ async def test_tps_fallback_no_usage():
     (simulando hit de cache ou provedores limitados).
     O fallback deve calcular os tokens com base na heurística len(content) / 4.
     """
-    from main import app, model_tps, ALL_MODELS as MODELS
+    from main import app
+    from core.state import model_tps
+    from core.config import ALL_MODELS as MODELS
     from unittest.mock import patch, MagicMock
     import time
     
@@ -256,8 +264,9 @@ async def test_split_margin_variables():
     1. GLOBAL_CONCURRENT_MARGIN e MODEL_RPM_BURST_THRESHOLD são carregados corretamente.
     2. MAX_CONCURRENT é derivado de GLOBAL_CONCURRENT_MARGIN.
     """
-    from main import GLOBAL_CONCURRENT_MARGIN, MODEL_RPM_BURST_THRESHOLD, MAX_CONCURRENT, ALL_MODELS
+    from core.config import GLOBAL_CONCURRENT_MARGIN, MODEL_RPM_BURST_THRESHOLD, ALL_MODELS
+    from domain.routing import MAX_CONCURRENT
     
     assert GLOBAL_CONCURRENT_MARGIN is not None
     assert MODEL_RPM_BURST_THRESHOLD is not None
-    assert MAX_CONCURRENT == max(1, len(ALL_MODELS) - GLOBAL_CONCURRENT_MARGIN)
+    assert MAX_CONCURRENT == min(100, max(1, (len(ALL_MODELS) - GLOBAL_CONCURRENT_MARGIN) * MODEL_RPM_BURST_THRESHOLD))

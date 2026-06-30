@@ -9,7 +9,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copia o código fonte para dentro do container
-COPY main.py .
+COPY . .
 
 # Expõe a porta que a API vai rodar
 EXPOSE 8000

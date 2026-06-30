@@ -8,15 +8,29 @@ O objetivo principal é evitar a sobrecarga de um único modelo em cenários de 
 ## 📂 Estrutura do Projeto
 
 ```text
-llm_router/
-├── main.py              # Código fonte da API (FastAPI)
-├── requirements.txt     # Dependências do Python
-├── Dockerfile           # Instruções de build do container
-├── .env                 # Variáveis de ambiente (crie a partir do .env.example)
-├── .env.example         # Exemplo de variáveis de ambiente
-├── test_api.py          # Testes das rotas de negócio
-├── test_version.py      # Testes de unidade e integridade da versão
-└── README.md            # Documentação de uso e deploy
+API_LLM_Router/
+├── api/
+│   └── routes.py             # Definições de rotas FastAPI
+├── core/
+│   ├── auth.py               # Dependências de autenticação
+│   ├── config.py             # Variáveis de ambiente e constantes
+│   └── state.py              # Estado global em memória (Rate limits, semáforos)
+├── domain/
+│   ├── dto.py                # Modelos Pydantic (Validação de schemas)
+│   └── routing.py            # Lógica de negócio (Seleção de modelo e concorrência)
+├── infrastructure/
+│   ├── client_repo.py        # Repositório para leitura do clients.json
+│   ├── dashboard.py          # Renderização do Live Dashboard (Rich)
+│   └── llm_client.py         # Integração externa HTTPX e Fallbacks
+├── tests/
+│   ├── test_api.py           # Testes de integração
+│   └── test_concurrency.py   # Testes unitários do cálculo de concorrência
+├── main.py                   # App FastAPI e gerenciamento de Lifespan
+├── requirements.txt          # Dependências do Python
+├── Dockerfile                # Instruções de build do container
+├── .env                      # Variáveis de ambiente
+├── .env.example              # Exemplo de variáveis de ambiente
+└── README.md                 # Documentação de uso e deploy
 ```
 
 ## 🚀 Como Executar Localmente com Docker
